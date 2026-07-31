@@ -1,0 +1,5 @@
+name: calib
+dependencies:
+  - numpy
+  - opencv
+  - scikit-learn
