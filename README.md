@@ -10,6 +10,7 @@ This library is for **camera calibration** (estimating camera intrinsic paramete
 ## Supported camera models
 - Fisheye camera
 - Pinhole camera (normal camera)
+- Double Sphere camera model ([Usenko et al., 2018](https://github.com/VladyslavUsenko/basalt))
 
 ## Supported sensor types
 - RGB sensor
@@ -25,23 +26,25 @@ The library includes 2 scripts:
 Utilities:
 - [utils.py](calibrator.py): Calibrator class and other utility functions
 - [Checkerboard-A3-55mm-6x4.pdf](Checkerboard-A3-55mm-6x4.pdf): checkerboard pattern file for calibrating the camera
-- [environment.yaml](environment.yaml): Anaconda environment file for installing dependencies
+- [pyproject.toml](pyproject.toml): uv project file for installing dependencies
 
 # Installation
-- Create a new environment using Anaconda:
-```conda env create -f environment.yaml```
-- Activate the environment:
-```conda activate calib```
+- Install [uv](https://docs.astral.sh/uv/), then sync dependencies:
+```uv sync```
+- Run any script with `uv run`, e.g.:
+```uv run python calibration.py -i 0 -m 0 -l -c "10,7" -o "C:\Users\hoa\Pictures\Camera Roll\calibration.xml" -g good -d detect```
 
 # Usage
 
 ## 1. Calibration
 ### Disclaimer
-The distortion coefficient values are in format k1, k2, p1, p2[, k3[, k4, k5, k6[, s1, s2, s3, s4[, tx, ty]]]]) of 4, 5, 8, 12, or 14 elements:
+For pinhole/fisheye camera models, the distortion coefficient values are in format k1, k2, p1, p2[, k3[, k4, k5, k6[, s1, s2, s3, s4[, tx, ty]]]]) of 4, 5, 8, 12, or 14 elements:
 - k[] values are the **radial coefficients**.
 - p[] values are the **tangential distortion coefficients**.
 - s[] values are the **thin prism distortion coefficients**.
-- Higher-order coefficients are currently not considered. 
+- Higher-order coefficients are currently not considered.
+
+For the double sphere camera model, the distortion coefficient values are `[xi, alpha]` (2 elements), and the camera matrix `K` holds `fx, fy, cx, cy` as usual.
 
 ### 1.1. Calibration using stream data (video/USB stream)
 
@@ -50,15 +53,17 @@ The distortion coefficient values are in format k1, k2, p1, p2[, k3[, k4, k5, k6
 2. Run the script **calibration.py** with the below command:
 
 ```
-python calibration.py -i [index] -f [fisheye] -t [thermal] -l [low_res] -c [checkerboard_size] -p [param_thres] -q [quantity_thres] -o [output_path] -g [good] -d [detect]
+python calibration.py -i [index] -m [model] -t [thermal] -l [low_res] -c [checkerboard_size] -p [param_thres] -q [quantity_thres] -o [output_path] -g [good] -d [detect]
 ```
 
 where:
 
 - **index**: input source (camera index/video path). The default value is `0`.
- - **fisheye**: if set, the camera is supposed to be a **fisheye model** (if it is supposed to be a **pinhole model**, one can skip it)
+ <!-- - **fisheye**: if set, the camera is supposed to be a **fisheye model** (if it is supposed to be a **pinhole model**, one can skip it)
+ - **double_sphere**: if set, the camera is supposed to follow the **double sphere camera model** (mutually exclusive with `-f`) -->
+ - **model**: select the camera model (0: pinhole, 1: fisheye, 2: double sphere) (default is 0) 
  - **thermal**: if set, the camera sensor is supposed to be a **thermal sensor** (if it is supposed to be an **RGB sensor**, one can skip it)
-  - **low_res**: flag to set if the camera/video has a low resolution. The default value is `False` (if the camera/video has a low resolution, put flag `-l` into the command, otherwise, just skip it). If the camera/video has a considerably good resolution, it is highly recommended to skip this flag to achieve a better checkerboard detection result => better calibration result.
+ - **low_res**: flag to set if the camera/video has a low resolution. The default value is `False` (if the camera/video has a low resolution, put flag `-l` into the command, otherwise, just skip it). If the camera/video has a considerably good resolution, it is highly recommended to skip this flag to achieve a better checkerboard detection result => better calibration result.
  - **checkerboard_size**: checkerboard size (the number of corners per row x the number of corners per column). The default value is `6, 4`.
  - **param_thres**: The parameter threshold for evaluating the detected corners is **good** and will be used for calibration. The default value is `0.2`.
  - **quantity_thres**: the minimum number of images with **good** detected corners that will be considered enough for calibration. The default value is `40` (images).
@@ -68,7 +73,7 @@ where:
  
 example:
 ```
-python calibration.py -i 0 -f -l -c "10,7" -o "C:\Users\hoa\Pictures\Camera Roll\calibration.xml" -g good -d detect
+python calibration.py -i 0 -m 0 -l -c "10,7" -o "C:\Users\hoa\Pictures\Camera Roll\calibration.xml" -g good -d detect
 ```
 
 3. Move the camera to capture the checkerboard image in different viewpoints. Try to cover all the visible areas of the camera and make sure that **every corner of the checkerboard is visible** from the camera's viewpoint. On each viewpoint where checkerboard corners are detected, these corners will be displayed:
@@ -100,15 +105,17 @@ To calibrate the thermal (infrared) camera, the checkerboard should be put on a 
 1. Run the script **calibration_images.py** with the below command:
 
 ```
-python calibration_images.py -i [input] -f [fisheye] -t [thermal] -l [low_res] -c [checkerboard_size] -p [param_thres] -q [quantity_thres] -o [output_path] -g [good] -d [detect]
+python calibration_images.py -i [input] -m [model] -t [thermal] -l [low_res] -c [checkerboard_size] -p [param_thres] -q [quantity_thres] -o [output_path] -g [good] -d [detect]
 ```
 
 where:
 
 - **input**: the directory which contains captured images.
- - **fisheye**: if set, the camera is supposed to be a **fisheye model** (if it is supposed to be a **pinhole model**, one can skip it)
+ <!-- - **fisheye**: if set, the camera is supposed to be a **fisheye model** (if it is supposed to be a **pinhole model**, one can skip it)
+ - **double_sphere**: if set, the camera is supposed to follow the **double sphere camera model** (mutually exclusive with `-f`) -->
+ - **model**: select the camera model (0: pinhole, 1: fisheye, 2: double sphere) (default is 0)  
  - **thermal**: if set, the camera sensor is supposed to be a **thermal sensor** (if it is supposed to be an **RGB sensor**, one can skip it)
-  - **low_res**: flag to set if the camera/video has a low resolution. The default value is `False` (if the camera/video has a low resolution, put flag `-l` into the command, otherwise, just skip it). If the camera/video has a considerably good resolution, it is highly recommended to skip this flag to achieve a better checkerboard detection result => better calibration result.
+ - **low_res**: flag to set if the camera/video has a low resolution. The default value is `False` (if the camera/video has a low resolution, put flag `-l` into the command, otherwise, just skip it). If the camera/video has a considerably good resolution, it is highly recommended to skip this flag to achieve a better checkerboard detection result => better calibration result.
  - **checkerboard_size**: checkerboard size (the number of corners per row x the number of corners per column). The default value is `6, 4`.
  - **param_thres**: The parameter threshold for evaluating the detected corners is **good** and will be used for calibration. The default value is `0.2`.
  - **quantity_thres**: the minimum number of images with **good** detected corners that will be considered enough for calibration. The default value is `40` (images).
@@ -118,7 +125,7 @@ where:
  
 example:
 ```
-python calibration_images.py -i input -f -l -c "10,7" -o "C:\Users\hoa\Pictures\Camera Roll\calibration.xml" -g good -d detect
+python calibration_images.py -i input -m 0 -l -c "10,7" -o "C:\Users\hoa\Pictures\Camera Roll\calibration.xml" -g good -d detect
 ```
 
 3. On each image where checkerboard corners are detected, these corners will be displayed:

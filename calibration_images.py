@@ -11,7 +11,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-i", "--input", help="Input directory", required=True)
     parser.add_argument("-c", "--checkerboard_size", help="Checkboard size (number of columns x number of rows) (default is 6,4)", type=lambda s: [int(item) for item in s.split(',')], default = [6, 4])
-    parser.add_argument("-f", "--fisheye", help="Is fisheye camera", action='store_true')
+    parser.add_argument("-m", "--model", help="Camera model (0: pinhole, 1: fisheye, 2: double sphere) (default is 0)", type=int, default=0)
+    # parser.add_argument("-f", "--fisheye", help="Is fisheye camera", action='store_true')
+    # parser.add_argument("-ds", "--double_sphere", help="Is double sphere camera model", action='store_true')
     parser.add_argument("-t", "--thermal", help="Is thermal camera (default is false)", action='store_true')
     parser.add_argument("-l", "--low_res", help="Is low-resolution stream", action='store_true')
     parser.add_argument("-p", "--param_thres", help="Param threshold for evaluating good detected corners (default is 0.2)",
@@ -29,7 +31,7 @@ if __name__ == "__main__":
     # cam = cv2.VideoCapture(eval(source) if source.isnumeric() else source)
     imgPaths = glob(args.input + "/*.png") + glob(args.input + "/*.jpg")
     OUTPUT_FILE = args.output_path
-    calibrator = Calibrator(args.fisheye, args.thermal, args.param_thres, args.quantity_thres) 
+    calibrator = Calibrator(args.model, args.thermal, args.param_thres, args.quantity_thres)
     calibrator.setCheckerboard(args.checkerboard_size, args.low_res) # args.thermal or 
     
     good = args.good 

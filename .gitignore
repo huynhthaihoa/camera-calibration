@@ -10,3 +10,4 @@ __pycache__
 *.rar
 omnicalib
 *.pdf
+.venv

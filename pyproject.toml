@@ -1,0 +1,11 @@
+[project]
+name = "camera-calibration"
+version = "0.1.0"
+description = "Camera calibration and undistortion tool (pinhole, fisheye, double sphere models)"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "scikit-learn",
+    "scipy",
+]

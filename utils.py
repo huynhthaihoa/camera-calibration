@@ -6,6 +6,7 @@ import glob
 import pickle
 from math import sqrt, ceil, pi, acos
 from enum import Enum
+from scipy.optimize import least_squares
 
 FISHEYE_CALIBRATION_FLAGS = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW#+cv2.fisheye.CALIB_CHECK_COND
 PINHOLE_CALIBRATION_FLAGS = 0
@@ -90,15 +91,114 @@ def lmax(seq1, seq2):
     """ Pairwise maximum of two sequences """
     return [max(a, b) for (a, b) in zip(seq1, seq2)]
 
+def _dsProject(x, y, z, fx, fy, cx, cy, xi, alpha):
+    """
+    Double Sphere forward projection (Usenko et al., "The Double Sphere Camera
+    Model", 3DV 2018): camera-frame 3D coordinates -> pixel coordinates.
+    x, y, z may be scalars or numpy arrays of any (matching) shape.
+    """
+    d1 = np.sqrt(x**2 + y**2 + z**2)
+    d2 = np.sqrt(x**2 + y**2 + (xi * d1 + z)**2)
+    denom = alpha * d2 + (1. - alpha) * (xi * d1 + z)
+    denom = np.where(np.abs(denom) < 1e-9, 1e-9, denom)
+    u = fx * x / denom + cx
+    v = fy * y / denom + cy
+    return u, v
+
+def _dsProjectPoints(objPoints, rvec, tvec, fx, fy, cx, cy, xi, alpha):
+    """
+    Project Nx3 object points into pixel coordinates given extrinsics (rvec,
+    tvec) and Double Sphere intrinsics. Returns Nx2 image points.
+    """
+    R, _ = cv2.Rodrigues(rvec)
+    Xc = (R @ objPoints.reshape(-1, 3).T + tvec.reshape(3, 1)).T
+    u, v = _dsProject(Xc[:, 0], Xc[:, 1], Xc[:, 2], fx, fy, cx, cy, xi, alpha)
+    return np.stack([u, v], axis=1)
+
+def _dsPackParams(fx, fy, cx, cy, xi, alpha, rvecs, tvecs):
+    """ Pack Double Sphere intrinsics + per-view extrinsics into a flat parameter vector """
+    params = [fx, fy, cx, cy, xi, alpha]
+    for rvec, tvec in zip(rvecs, tvecs):
+        params.extend(np.asarray(rvec).flatten())
+        params.extend(np.asarray(tvec).flatten())
+    return np.array(params, dtype=np.float64)
+
+def _dsUnpackParams(params, nViews):
+    """ Inverse of _dsPackParams """
+    fx, fy, cx, cy, xi, alpha = params[:6]
+    rvecs, tvecs = [], []
+    offset = 6
+    for _ in range(nViews):
+        rvecs.append(params[offset:offset + 3].reshape(3, 1))
+        tvecs.append(params[offset + 3:offset + 6].reshape(3, 1))
+        offset += 6
+    return fx, fy, cx, cy, xi, alpha, rvecs, tvecs
+
+def _dsResiduals(params, objPointsList, imgPointsList):
+    """ Flattened reprojection residuals across all calibration views """
+    nViews = len(objPointsList)
+    fx, fy, cx, cy, xi, alpha, rvecs, tvecs = _dsUnpackParams(params, nViews)
+    residuals = []
+    for objPts, imgPts, rvec, tvec in zip(objPointsList, imgPointsList, rvecs, tvecs):
+        proj = _dsProjectPoints(objPts, rvec, tvec, fx, fy, cx, cy, xi, alpha)
+        obs = np.asarray(imgPts).reshape(-1, 2)
+        residuals.append((proj - obs).flatten())
+    return np.concatenate(residuals)
+
+def _dsCalibrate(objPoints, imgPoints, dim):
+    """
+    Calibrate a Double Sphere camera from checkerboard correspondences via
+    nonlinear least squares (joint optimization of intrinsics and per-view
+    extrinsics), since OpenCV has no built-in solver for this model.
+
+    Args:
+        objPoints: list of per-view Nx1x3 object point arrays
+        imgPoints: list of per-view Nx1x2 detected corner arrays
+        dim: (width, height) of the calibration images
+
+    Returns:
+        reproj_err, K, D, rvecs, tvecs
+    """
+    width, height = dim
+    nViews = len(objPoints)
+
+    fx0 = fy0 = 0.5 * (width + height) / 2.
+    cx0, cy0 = width / 2., height / 2.
+    xi0, alpha0 = 0.0, 0.5
+
+    K0 = np.array([[fx0, 0, cx0], [0, fy0, cy0], [0, 0, 1]], dtype=np.float64)
+    rvecs0, tvecs0 = [], []
+    for objPts, imgPts in zip(objPoints, imgPoints):
+        _, rvec, tvec = cv2.solvePnP(np.asarray(objPts, dtype=np.float64),
+                                      np.asarray(imgPts, dtype=np.float64), K0, None)
+        rvecs0.append(rvec)
+        tvecs0.append(tvec)
+
+    x0 = _dsPackParams(fx0, fy0, cx0, cy0, xi0, alpha0, rvecs0, tvecs0)
+
+    lower = [1., 1., 0., 0., -1., 1e-6] + [-np.inf] * (6 * nViews)
+    upper = [np.inf, np.inf, width, height, 1., 1. - 1e-6] + [np.inf] * (6 * nViews)
+
+    result = least_squares(_dsResiduals, x0, bounds=(lower, upper), method='trf',
+                            args=(objPoints, imgPoints))
+
+    fx, fy, cx, cy, xi, alpha, rvecs, tvecs = _dsUnpackParams(result.x, nViews)
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    D = np.array([[xi], [alpha]], dtype=np.float64)
+    reproj_err = float(np.sqrt(np.mean(result.fun**2)))
+    return reproj_err, K, D, rvecs, tvecs
+
 class CAMERA_MODEL(Enum):
     """Supported camera model
 
     Args:
         PINHOLE = 0
         FISHEYE = 1
+        DOUBLE_SPHERE = 2
     """    
     PINHOLE = 0
     FISHEYE = 1
+    DOUBLE_SPHERE = 2
     
 class IMAGE_SENSOR(Enum):
     """Supported sensor
@@ -233,19 +333,20 @@ class CornerDetector:
 class Calibrator:
     """Calibrator class
     """    
-    def __init__(self, fisheye = False, is_thermal = False, param_thres = 0.2, quantity_thres = 40):#, CALIBRATION_FLAGS = 0):
+    def __init__(self, model = 0, is_thermal = False, param_thres = 0.2, quantity_thres = 40):#, CALIBRATION_FLAGS = 0):
         """Instance initialization
         Args:
-            model (int): camera model (0: pinhole, 1: fisheye)
+            model (int): camera model (0: pinhole, 1: fisheye, 2: double sphere)
             param_thres (float): param threshold for evaluating good detected corners
             quantity_thres (int): minimum number of good images for calibration
-        """        
-        if not fisheye:
-            self.camera_model = CAMERA_MODEL.PINHOLE
-            self.calibration_flags = PINHOLE_CALIBRATION_FLAGS
-        else:
-            self.camera_model = CAMERA_MODEL.FISHEYE
+        """
+        self.camera_model = CAMERA_MODEL(model)  # raises ValueError if model isn't 0, 1, or 2
+        if self.camera_model == CAMERA_MODEL.DOUBLE_SPHERE:
+            self.calibration_flags = None
+        elif self.camera_model == CAMERA_MODEL.FISHEYE:
             self.calibration_flags = FISHEYE_CALIBRATION_FLAGS
+        else:
+            self.calibration_flags = PINHOLE_CALIBRATION_FLAGS
         if is_thermal:
             self.image_sensor = IMAGE_SENSOR.THERMAL
         else:
@@ -304,6 +405,8 @@ class Calibrator:
         model = cv_file.getNode("model").string()
         if model == 'pinhole':
             self.camera_model = CAMERA_MODEL.PINHOLE
+        elif model == 'double_sphere':
+            self.camera_model = CAMERA_MODEL.DOUBLE_SPHERE
         else:
             self.camera_model = CAMERA_MODEL.FISHEYE
         
@@ -342,6 +445,8 @@ class Calibrator:
         cv_file = cv2.FileStorage(filename, cv2.FILE_STORAGE_WRITE)
         if self.camera_model == CAMERA_MODEL.FISHEYE:
             cv_file.write("model", "fisheye")
+        elif self.camera_model == CAMERA_MODEL.DOUBLE_SPHERE:
+            cv_file.write("model", "double_sphere")
         else:
             cv_file.write("model", "pinhole")
         # cv_file.write("model", str(self.camera_model))
@@ -390,7 +495,23 @@ class Calibrator:
             newcameramtx[0, 0] /= (1. + alpha)
             newcameramtx[1, 1] /= (1. + alpha)
             self.mapx, self.mapy = cv2.fisheye.initUndistortRectifyMap(K, self.D, R, newcameramtx, new_dim, cv2.CV_32FC1)
-            
+        elif self.camera_model == CAMERA_MODEL.DOUBLE_SPHERE:
+            # OpenCV has no Double Sphere variant of initUndistortRectifyMap, so build the map
+            # manually: for each destination (rectified) pixel, cast a ray from a virtual pinhole
+            # camera and forward-project it through the Double Sphere model to find the source pixel.
+            fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+            ds_xi, ds_alpha = self.D[0, 0], self.D[1, 0]
+            new_fx = fx / (1. + alpha)
+            new_fy = fy / (1. + alpha)
+            new_cx, new_cy = cx, cy
+            u, v = np.meshgrid(np.arange(new_dim[0], dtype=np.float64), np.arange(new_dim[1], dtype=np.float64))
+            x = (u - new_cx) / new_fx
+            y = (v - new_cy) / new_fy
+            z = np.ones_like(x)
+            mapx, mapy = _dsProject(x, y, z, fx, fy, cx, cy, ds_xi, ds_alpha)
+            self.mapx = mapx.astype(np.float32)
+            self.mapy = mapy.astype(np.float32)
+
     def getParams(self, corners):
         """
         Return list of parameters [X, Y, size, skew] describing the checkerboard view:
@@ -478,9 +599,11 @@ class Calibrator:
             intrinsics_in = np.eye(3, dtype=np.float64)
             ipts = np.asarray(corners, dtype=np.float64)
             opts = np.asarray(objPoints, dtype=np.float64)
-            self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = cv2.fisheye.calibrate(opts, ipts, self.dim, intrinsics_in, 
+            self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = cv2.fisheye.calibrate(opts, ipts, self.dim, intrinsics_in,
                                                                                        None, flags = self.calibration_flags)
-            
+        elif self.camera_model == CAMERA_MODEL.DOUBLE_SPHERE:
+            self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = _dsCalibrate(objPoints, corners, self.dim)
+
     def detectCorners(self, img, accum=True):
         """Detect corners from image
 
