@@ -91,102 +91,121 @@ def lmax(seq1, seq2):
     """ Pairwise maximum of two sequences """
     return [max(a, b) for (a, b) in zip(seq1, seq2)]
 
-def _dsProject(x, y, z, fx, fy, cx, cy, xi, alpha):
+class DoubleSphereModel:
     """
-    Double Sphere forward projection (Usenko et al., "The Double Sphere Camera
-    Model", 3DV 2018): camera-frame 3D coordinates -> pixel coordinates.
-    x, y, z may be scalars or numpy arrays of any (matching) shape.
+    Double Sphere camera model (Usenko et al., "The Double Sphere Camera Model",
+    3DV 2018), including projection math and from-scratch calibration via nonlinear
+    least squares, since OpenCV has no built-in support for this model.
     """
-    d1 = np.sqrt(x**2 + y**2 + z**2)
-    d2 = np.sqrt(x**2 + y**2 + (xi * d1 + z)**2)
-    denom = alpha * d2 + (1. - alpha) * (xi * d1 + z)
-    denom = np.where(np.abs(denom) < 1e-9, 1e-9, denom)
-    u = fx * x / denom + cx
-    v = fy * y / denom + cy
-    return u, v
 
-def _dsProjectPoints(objPoints, rvec, tvec, fx, fy, cx, cy, xi, alpha):
-    """
-    Project Nx3 object points into pixel coordinates given extrinsics (rvec,
-    tvec) and Double Sphere intrinsics. Returns Nx2 image points.
-    """
-    R, _ = cv2.Rodrigues(rvec)
-    Xc = (R @ objPoints.reshape(-1, 3).T + tvec.reshape(3, 1)).T
-    u, v = _dsProject(Xc[:, 0], Xc[:, 1], Xc[:, 2], fx, fy, cx, cy, xi, alpha)
-    return np.stack([u, v], axis=1)
+    def __init__(self, fx, fy, cx, cy, xi, alpha):
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self.xi = xi
+        self.alpha = alpha
 
-def _dsPackParams(fx, fy, cx, cy, xi, alpha, rvecs, tvecs):
-    """ Pack Double Sphere intrinsics + per-view extrinsics into a flat parameter vector """
-    params = [fx, fy, cx, cy, xi, alpha]
-    for rvec, tvec in zip(rvecs, tvecs):
-        params.extend(np.asarray(rvec).flatten())
-        params.extend(np.asarray(tvec).flatten())
-    return np.array(params, dtype=np.float64)
+    def project(self, x, y, z):
+        """
+        Double Sphere forward projection: camera-frame 3D coordinates -> pixel coordinates.
+        x, y, z may be scalars or numpy arrays of any (matching) shape.
+        """
+        d1 = np.sqrt(x**2 + y**2 + z**2)
+        d2 = np.sqrt(x**2 + y**2 + (self.xi * d1 + z)**2)
+        denom = self.alpha * d2 + (1. - self.alpha) * (self.xi * d1 + z)
+        denom = np.where(np.abs(denom) < 1e-9, 1e-9, denom)
+        u = self.fx * x / denom + self.cx
+        v = self.fy * y / denom + self.cy
+        return u, v
 
-def _dsUnpackParams(params, nViews):
-    """ Inverse of _dsPackParams """
-    fx, fy, cx, cy, xi, alpha = params[:6]
-    rvecs, tvecs = [], []
-    offset = 6
-    for _ in range(nViews):
-        rvecs.append(params[offset:offset + 3].reshape(3, 1))
-        tvecs.append(params[offset + 3:offset + 6].reshape(3, 1))
-        offset += 6
-    return fx, fy, cx, cy, xi, alpha, rvecs, tvecs
+    def projectPoints(self, objPoints, rvec, tvec):
+        """
+        Project Nx3 object points into pixel coordinates given extrinsics (rvec,
+        tvec) and this instance's Double Sphere intrinsics. Returns Nx2 image points.
+        """
+        R, _ = cv2.Rodrigues(rvec)
+        Xc = (R @ objPoints.reshape(-1, 3).T + tvec.reshape(3, 1)).T
+        u, v = self.project(Xc[:, 0], Xc[:, 1], Xc[:, 2])
+        return np.stack([u, v], axis=1)
 
-def _dsResiduals(params, objPointsList, imgPointsList):
-    """ Flattened reprojection residuals across all calibration views """
-    nViews = len(objPointsList)
-    fx, fy, cx, cy, xi, alpha, rvecs, tvecs = _dsUnpackParams(params, nViews)
-    residuals = []
-    for objPts, imgPts, rvec, tvec in zip(objPointsList, imgPointsList, rvecs, tvecs):
-        proj = _dsProjectPoints(objPts, rvec, tvec, fx, fy, cx, cy, xi, alpha)
-        obs = np.asarray(imgPts).reshape(-1, 2)
-        residuals.append((proj - obs).flatten())
-    return np.concatenate(residuals)
+    @staticmethod
+    def _packParams(fx, fy, cx, cy, xi, alpha, rvecs, tvecs):
+        """ Pack Double Sphere intrinsics + per-view extrinsics into a flat parameter vector """
+        params = [fx, fy, cx, cy, xi, alpha]
+        for rvec, tvec in zip(rvecs, tvecs):
+            params.extend(np.asarray(rvec).flatten())
+            params.extend(np.asarray(tvec).flatten())
+        return np.array(params, dtype=np.float64)
 
-def _dsCalibrate(objPoints, imgPoints, dim):
-    """
-    Calibrate a Double Sphere camera from checkerboard correspondences via
-    nonlinear least squares (joint optimization of intrinsics and per-view
-    extrinsics), since OpenCV has no built-in solver for this model.
+    @staticmethod
+    def _unpackParams(params, nViews):
+        """ Inverse of _packParams """
+        fx, fy, cx, cy, xi, alpha = params[:6]
+        rvecs, tvecs = [], []
+        offset = 6
+        for _ in range(nViews):
+            rvecs.append(params[offset:offset + 3].reshape(3, 1))
+            tvecs.append(params[offset + 3:offset + 6].reshape(3, 1))
+            offset += 6
+        return fx, fy, cx, cy, xi, alpha, rvecs, tvecs
 
-    Args:
-        objPoints: list of per-view Nx1x3 object point arrays
-        imgPoints: list of per-view Nx1x2 detected corner arrays
-        dim: (width, height) of the calibration images
+    @staticmethod
+    def _residuals(params, objPointsList, imgPointsList):
+        """ Flattened reprojection residuals across all calibration views """
+        nViews = len(objPointsList)
+        fx, fy, cx, cy, xi, alpha, rvecs, tvecs = DoubleSphereModel._unpackParams(params, nViews)
+        model = DoubleSphereModel(fx, fy, cx, cy, xi, alpha)
+        residuals = []
+        for objPts, imgPts, rvec, tvec in zip(objPointsList, imgPointsList, rvecs, tvecs):
+            proj = model.projectPoints(objPts, rvec, tvec)
+            obs = np.asarray(imgPts).reshape(-1, 2)
+            residuals.append((proj - obs).flatten())
+        return np.concatenate(residuals)
 
-    Returns:
-        reproj_err, K, D, rvecs, tvecs
-    """
-    width, height = dim
-    nViews = len(objPoints)
+    @staticmethod
+    def calibrate(objPoints, imgPoints, dim):
+        """
+        Calibrate a Double Sphere camera from checkerboard correspondences via
+        nonlinear least squares (joint optimization of intrinsics and per-view
+        extrinsics), since OpenCV has no built-in solver for this model.
 
-    fx0 = fy0 = 0.5 * (width + height) / 2.
-    cx0, cy0 = width / 2., height / 2.
-    xi0, alpha0 = 0.0, 0.5
+        Args:
+            objPoints: list of per-view Nx1x3 object point arrays
+            imgPoints: list of per-view Nx1x2 detected corner arrays
+            dim: (width, height) of the calibration images
 
-    K0 = np.array([[fx0, 0, cx0], [0, fy0, cy0], [0, 0, 1]], dtype=np.float64)
-    rvecs0, tvecs0 = [], []
-    for objPts, imgPts in zip(objPoints, imgPoints):
-        _, rvec, tvec = cv2.solvePnP(np.asarray(objPts, dtype=np.float64),
-                                      np.asarray(imgPts, dtype=np.float64), K0, None)
-        rvecs0.append(rvec)
-        tvecs0.append(tvec)
+        Returns:
+            reproj_err, K, D, rvecs, tvecs
+        """
+        width, height = dim
+        nViews = len(objPoints)
 
-    x0 = _dsPackParams(fx0, fy0, cx0, cy0, xi0, alpha0, rvecs0, tvecs0)
+        fx0 = fy0 = 0.5 * (width + height) / 2.
+        cx0, cy0 = width / 2., height / 2.
+        xi0, alpha0 = 0.0, 0.5
 
-    lower = [1., 1., 0., 0., -1., 1e-6] + [-np.inf] * (6 * nViews)
-    upper = [np.inf, np.inf, width, height, 1., 1. - 1e-6] + [np.inf] * (6 * nViews)
+        K0 = np.array([[fx0, 0, cx0], [0, fy0, cy0], [0, 0, 1]], dtype=np.float64)
+        rvecs0, tvecs0 = [], []
+        for objPts, imgPts in zip(objPoints, imgPoints):
+            _, rvec, tvec = cv2.solvePnP(np.asarray(objPts, dtype=np.float64),
+                                          np.asarray(imgPts, dtype=np.float64), K0, None)
+            rvecs0.append(rvec)
+            tvecs0.append(tvec)
 
-    result = least_squares(_dsResiduals, x0, bounds=(lower, upper), method='trf',
-                            args=(objPoints, imgPoints))
+        x0 = DoubleSphereModel._packParams(fx0, fy0, cx0, cy0, xi0, alpha0, rvecs0, tvecs0)
 
-    fx, fy, cx, cy, xi, alpha, rvecs, tvecs = _dsUnpackParams(result.x, nViews)
-    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
-    D = np.array([[xi], [alpha]], dtype=np.float64)
-    reproj_err = float(np.sqrt(np.mean(result.fun**2)))
-    return reproj_err, K, D, rvecs, tvecs
+        lower = [1., 1., 0., 0., -1., 1e-6] + [-np.inf] * (6 * nViews)
+        upper = [np.inf, np.inf, width, height, 1., 1. - 1e-6] + [np.inf] * (6 * nViews)
+
+        result = least_squares(DoubleSphereModel._residuals, x0, bounds=(lower, upper), method='trf',
+                                args=(objPoints, imgPoints))
+
+        fx, fy, cx, cy, xi, alpha, rvecs, tvecs = DoubleSphereModel._unpackParams(result.x, nViews)
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+        D = np.array([[xi], [alpha]], dtype=np.float64)
+        reproj_err = float(np.sqrt(np.mean(result.fun**2)))
+        return reproj_err, K, D, rvecs, tvecs
 
 class CAMERA_MODEL(Enum):
     """Supported camera model
@@ -422,18 +441,6 @@ class Calibrator:
         # cv_file.write("dim", self.dim)
         cv_file.release()
     
-    # def getCalibInfo(self, dim, K, D):
-    #     """Get camera intrinsic parameters from input value
-
-    #     Args:
-    #         dim: image shape 
-    #         K: camera matrix
-    #         D: distortion coefficients
-    #     """        
-    #     self.dim = dim
-    #     self.K = np.asarray(K)
-    #     self.D = np.asarray(D)
-    
     def saveCalib(self, filename):
         """Save the calibration information to file
         Args:
@@ -508,7 +515,8 @@ class Calibrator:
             x = (u - new_cx) / new_fx
             y = (v - new_cy) / new_fy
             z = np.ones_like(x)
-            mapx, mapy = _dsProject(x, y, z, fx, fy, cx, cy, ds_xi, ds_alpha)
+            ds_model = DoubleSphereModel(fx, fy, cx, cy, ds_xi, ds_alpha)
+            mapx, mapy = ds_model.project(x, y, z)
             self.mapx = mapx.astype(np.float32)
             self.mapy = mapy.astype(np.float32)
 
@@ -602,7 +610,7 @@ class Calibrator:
             self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = cv2.fisheye.calibrate(opts, ipts, self.dim, intrinsics_in,
                                                                                        None, flags = self.calibration_flags)
         elif self.camera_model == CAMERA_MODEL.DOUBLE_SPHERE:
-            self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = _dsCalibrate(objPoints, corners, self.dim)
+            self.reproj_err, self.K, self.D, self.rvecs, self.tvecs = DoubleSphereModel.calibrate(objPoints, corners, self.dim)
 
     def detectCorners(self, img, accum=True):
         """Detect corners from image
