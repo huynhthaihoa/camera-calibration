@@ -9,14 +9,19 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--checkerboard_size", help="Checkboard size (number of columns x number of rows) (default is 6,4)", type=lambda s: [int(item) for item in s.split(',')], default = [6, 4])
     parser.add_argument("-l", "--stereo_left", help="Left camera calibration file path", default='stereo_left.xml', type=str)
     parser.add_argument("-r", "--stereo_right", help="Right camera calibration file path", default='stereo_right.xml', type=str)
-    parser.add_argument("-o", "--output", help="Output calibration file path", default='stereo.xml')
+    parser.add_argument("-m", "--model", help="Camera model (0: pinhole, 1: fisheye, 2: double sphere) (default is 0)", type=int, default=0)
     parser.add_argument("-t", "--thermal", help="Is thermal camera (default is false)", action='store_true')
     parser.add_argument("--low_res", help="Is low-resolution stream", action='store_true')
+    parser.add_argument("-p", "--param_thres", help="Param threshold for evaluating good detected corners (default is 0.2)",
+                    type=float, default=0.2)
+    parser.add_argument("-q", "--quantity_thres", help="Minimum number of good images for calibration (default is 40)",
+                    type=int, default=40)
+    parser.add_argument("-o", "--output", help="Output calibration file path", default='stereo.xml')
     args = parser.parse_args()
     
-    calibratorL = Calibrator() 
+    calibratorL = Calibrator(args.model, args.thermal, args.param_thres, args.quantity_thres) 
     calibratorL.getCalibInfo(args.stereo_left)
-    calibratorR = Calibrator() 
+    calibratorR = Calibrator(args.model, args.thermal, args.param_thres, args.quantity_thres) 
     calibratorR.getCalibInfo(args.stereo_right)
     
     nCols = max(args.checkerboard_size[0], args.checkerboard_size[1])
