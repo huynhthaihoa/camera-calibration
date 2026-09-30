@@ -17,14 +17,14 @@ This library is for **camera calibration** (estimating camera intrinsic paramete
 - Thermal (infrared) sensor
 
 # Library structure
-The library includes 2 scripts:
+The library includes 4 scripts:
 - [calibration.py](calibration.py): script to **calibrate** the camera/video file
 - [undistortion.py](undistortion.py): script to **undistort** the camera/video file
 - [calibration_images.py](calibration_images.py): script to **calibrate** the images (all images must be captured by the same camera)
 - [undistortion_images.py](undistortion_images.py): script to **undistort** the images
 
 Utilities:
-- [utils.py](calibrator.py): Calibrator class and other utility functions
+- [utils.py](utils.py): Calibrator class and other utility functions
 - [Checkerboard-A3-55mm-6x4.pdf](Checkerboard-A3-55mm-6x4.pdf): checkerboard pattern file for calibrating the camera
 - [pyproject.toml](pyproject.toml): uv project file for installing dependencies
 
